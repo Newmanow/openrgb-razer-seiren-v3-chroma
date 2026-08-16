@@ -1,0 +1,963 @@
+/*===========================================================================
+  Plugin OpenRGB - Razer Seiren V3 Chroma (micro)
+  Code source complet du plugin OpenRGB (tous fichiers regroupes).
+  Genere le 2026-08-16.
+
+  Pour reconstruire l'arborescence : chaque section delimitee par
+  =====> FICHIER: <chemin>  correspond a un fichier a recreer tel quel.
+===========================================================================*/
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RGBController_RazerSeiren.h
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RGBController_RazerSeiren.h                               |
+|                                                           |
+|   Couche RGBController OpenRGB pour le Razer Seiren V3     |
+|   Chroma.                                                 |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#pragma once
+
+#include "RGBController.h"
+#include "RazerSeirenController.h"
+
+enum
+{
+    SEIREN_MODE_DIRECT   = 0,
+    SEIREN_MODE_STATIC   = 1,
+    SEIREN_MODE_SPECTRUM = 2,
+    SEIREN_MODE_WAVE     = 3,
+    SEIREN_MODE_OFF      = 4,
+    SEIREN_MODE_BREATHING = 5,
+};
+
+class RGBController_RazerSeiren : public RGBController
+{
+public:
+    RGBController_RazerSeiren(RazerSeirenController* controller_ptr);
+    ~RGBController_RazerSeiren();
+
+    void        SetupZones();
+    void        ResizeZone(int zone, int new_size);
+
+    void        DeviceUpdateLEDs();
+    void        UpdateZoneLEDs(int zone);
+    void        UpdateSingleLED(int led);
+
+    void        DeviceUpdateMode();
+
+private:
+    RazerSeirenController* controller;
+};
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenController.h
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RazerSeirenController.h                                   |
+|                                                           |
+|   Pilote bas niveau du Razer Seiren V3 Chroma (1532:056F) |
+|   Protocole reverse-engineere : razer_report compact de   |
+|   63 octets, HID feature report ID 0x07, transaction_id   |
+|   0x1F, jeu de commandes "Extended Matrix" (classe 0x0F). |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#pragma once
+
+#include <string>
+#include <vector>
+#include <hidapi.h>
+
+#define SEIREN_VID              0x1532
+#define SEIREN_PID              0x056F
+#define SEIREN_USAGE_PAGE       0xFF53
+#define SEIREN_REPORT_ID        0x07
+#define SEIREN_TRANSACTION_ID   0x1F
+#define SEIREN_REPORT_SIZE      63          /* taille du razer_report compact     */
+#define SEIREN_ZERO_LED         0x00
+#define SEIREN_VARSTORE         0x01
+#define SEIREN_NUM_LEDS         16          /* rangee adressable (max par paquet) */
+
+class RazerSeirenController
+{
+public:
+    RazerSeirenController(hid_device* dev_handle, const char* path);
+    ~RazerSeirenController();
+
+    std::string     GetSerialString();
+    std::string     GetFirmwareString();
+    std::string     GetLocationString();
+
+    void            SetBrightness(unsigned char level);
+    void            SetStatic(unsigned char red, unsigned char green, unsigned char blue);
+    void            SetBreathing(unsigned char red, unsigned char green, unsigned char blue);
+    void            SetSpectrum();
+    void            SetWave(unsigned char direction, unsigned char speed);
+    void            SetOff();
+
+    /*-------------------------------------------------------*\
+    | rgb_data : R,G,B,R,G,B,... (au plus SEIREN_NUM_LEDS*3) |
+    \*-------------------------------------------------------*/
+    void            SetCustomFrame(const std::vector<unsigned char>& rgb_data);
+
+private:
+    hid_device*     dev;
+    std::string     location;
+    std::string     firmware;
+    std::string     serial;
+
+    /*-------------------------------------------------------*\
+    | Construit le paquet, l'envoie, et (optionnel) lit la    |
+    | reponse de 63 octets dans response.                     |
+    \*-------------------------------------------------------*/
+    int             SendPacket(unsigned char  command_class,
+                               unsigned char  command_id,
+                               unsigned char  data_size,
+                               const unsigned char* args,
+                               unsigned char  args_len,
+                               unsigned char* response);
+};
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenPlugin.h
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RazerSeirenPlugin.h                                       |
+|                                                           |
+|   Plugin OpenRGB ajoutant le support du Razer Seiren V3   |
+|   Chroma sans recompiler OpenRGB.                         |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#pragma once
+
+#include <QObject>
+#include <vector>
+
+#include "OpenRGBPluginInterface.h"
+#include "ResourceManagerInterface.h"
+
+class RGBController;
+
+class RazerSeirenPlugin : public QObject, public OpenRGBPluginInterface
+{
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID OpenRGBPluginInterface_IID FILE "RazerSeirenPlugin.json")
+    Q_INTERFACES(OpenRGBPluginInterface)
+
+public:
+    RazerSeirenPlugin();
+    ~RazerSeirenPlugin();
+
+    OpenRGBPluginInfo   GetPluginInfo()                                         override;
+    unsigned int        GetPluginAPIVersion()                                   override;
+
+    void                Load(ResourceManagerInterface* resource_manager_ptr)    override;
+    QWidget*            GetWidget()                                             override;
+    QMenu*              GetTrayMenu()                                           override;
+    void                Unload()                                               override;
+
+private:
+    ResourceManagerInterface*       RM = nullptr;
+    std::vector<RGBController*>      controllers;
+
+    /*-----------------------------------------------------*\
+    | Detecte le(s) Seiren et enregistre le(s) controleur(s)|
+    | (ignore ceux deja presents pour eviter les doublons). |
+    \*-----------------------------------------------------*/
+    void                DetectAndRegister();
+
+    /*-----------------------------------------------------*\
+    | Callbacks de detection (rescan) : OpenRGB detruit nos |
+    | controleurs au debut de chaque detection, il faut les |
+    | re-enregistrer a la fin.                              |
+    \*-----------------------------------------------------*/
+    static void         OnDetectionStart(void* this_ptr);
+    static void         OnDetectionEnd(void* this_ptr);
+};
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RGBController_RazerSeiren.cpp
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RGBController_RazerSeiren.cpp                             |
+|                                                           |
+|   Couche RGBController OpenRGB pour le Razer Seiren V3     |
+|   Chroma.                                                 |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#include "RGBController_RazerSeiren.h"
+#include <vector>
+
+/**------------------------------------------------------------------*\
+    @name Razer Seiren V3 Chroma
+    @type USB
+    @save :x:
+    @direct :white_check_mark:
+    @effects :white_check_mark:
+    @detectors DetectRazerSeiren
+    @comment Protocole reverse-engineere (report ID 0x07, paquet 63 octets).
+\*-------------------------------------------------------------------*/
+
+RGBController_RazerSeiren::RGBController_RazerSeiren(RazerSeirenController* controller_ptr)
+{
+    controller  = controller_ptr;
+
+    name        = "Razer Seiren V3 Chroma";
+    vendor      = "Razer";
+    type        = DEVICE_TYPE_MICROPHONE;
+    description = "Razer Seiren V3 Chroma microphone";
+    version     = controller->GetFirmwareString();
+    serial      = controller->GetSerialString();
+    location    = controller->GetLocationString();
+
+    /*-----------------------------------------------------*\
+    | Mode Direct (controle par-LED)                        |
+    \*-----------------------------------------------------*/
+    mode Direct;
+    Direct.name       = "Direct";
+    Direct.value      = SEIREN_MODE_DIRECT;
+    Direct.flags      = MODE_FLAG_HAS_PER_LED_COLOR | MODE_FLAG_HAS_BRIGHTNESS;
+    Direct.color_mode = MODE_COLORS_PER_LED;
+    Direct.brightness_min = 0;
+    Direct.brightness_max = 255;
+    Direct.brightness     = 255;
+    modes.push_back(Direct);
+
+    /*-----------------------------------------------------*\
+    | Mode Static (couleur unique materielle)               |
+    \*-----------------------------------------------------*/
+    mode Static;
+    Static.name       = "Static";
+    Static.value      = SEIREN_MODE_STATIC;
+    Static.flags      = MODE_FLAG_HAS_MODE_SPECIFIC_COLOR | MODE_FLAG_HAS_BRIGHTNESS;
+    Static.color_mode = MODE_COLORS_MODE_SPECIFIC;
+    Static.colors_min = 1;
+    Static.colors_max = 1;
+    Static.colors.resize(1);
+    Static.brightness_min = 0;
+    Static.brightness_max = 255;
+    Static.brightness     = 255;
+    modes.push_back(Static);
+
+    /*-----------------------------------------------------*\
+    | Mode Spectrum                                         |
+    \*-----------------------------------------------------*/
+    mode Spectrum;
+    Spectrum.name       = "Spectrum Cycle";
+    Spectrum.value      = SEIREN_MODE_SPECTRUM;
+    Spectrum.flags      = 0;
+    Spectrum.color_mode = MODE_COLORS_NONE;
+    modes.push_back(Spectrum);
+
+    /*-----------------------------------------------------*\
+    | Mode Wave                                             |
+    \*-----------------------------------------------------*/
+    mode Wave;
+    Wave.name       = "Wave";
+    Wave.value      = SEIREN_MODE_WAVE;
+    Wave.flags      = MODE_FLAG_HAS_SPEED | MODE_FLAG_HAS_DIRECTION_LR;
+    Wave.color_mode = MODE_COLORS_NONE;
+    Wave.speed_min  = 0x0A;
+    Wave.speed_max  = 0x50;
+    Wave.speed      = 0x28;
+    Wave.direction  = MODE_DIRECTION_LEFT;
+    modes.push_back(Wave);
+
+    /*-----------------------------------------------------*\
+    | Mode Breathing (respiration, couleur unique)          |
+    \*-----------------------------------------------------*/
+    mode Breathing;
+    Breathing.name       = "Breathing";
+    Breathing.value      = SEIREN_MODE_BREATHING;
+    Breathing.flags      = MODE_FLAG_HAS_MODE_SPECIFIC_COLOR;
+    Breathing.color_mode = MODE_COLORS_MODE_SPECIFIC;
+    Breathing.colors_min = 1;
+    Breathing.colors_max = 1;
+    Breathing.colors.resize(1);
+    modes.push_back(Breathing);
+
+    /*-----------------------------------------------------*\
+    | Mode Off                                              |
+    \*-----------------------------------------------------*/
+    mode Off;
+    Off.name       = "Off";
+    Off.value      = SEIREN_MODE_OFF;
+    Off.flags      = 0;
+    Off.color_mode = MODE_COLORS_NONE;
+    modes.push_back(Off);
+
+    SetupZones();
+
+    /*-----------------------------------------------------*\
+    | Mode Direct actif par defaut (pour les effets OpenRGB)|
+    \*-----------------------------------------------------*/
+    active_mode = 0;
+}
+
+RGBController_RazerSeiren::~RGBController_RazerSeiren()
+{
+    delete controller;
+}
+
+void RGBController_RazerSeiren::SetupZones()
+{
+    zone underglow;
+    underglow.name       = "Underglow";
+    underglow.type       = ZONE_TYPE_LINEAR;
+    underglow.leds_min   = SEIREN_NUM_LEDS;
+    underglow.leds_max   = SEIREN_NUM_LEDS;
+    underglow.leds_count = SEIREN_NUM_LEDS;
+    underglow.matrix_map = NULL;
+    zones.push_back(underglow);
+
+    for(unsigned int i = 0; i < SEIREN_NUM_LEDS; i++)
+    {
+        led new_led;
+        new_led.name = "LED " + std::to_string(i + 1);
+        leds.push_back(new_led);
+    }
+
+    SetupColors();
+}
+
+void RGBController_RazerSeiren::ResizeZone(int /*zone*/, int /*new_size*/)
+{
+    /*-----------------------------------------------------*\
+    | Zone de taille fixe : rien a faire                    |
+    \*-----------------------------------------------------*/
+}
+
+void RGBController_RazerSeiren::DeviceUpdateLEDs()
+{
+    /*-----------------------------------------------------*\
+    | Pousse le buffer de couleurs vers la custom frame     |
+    \*-----------------------------------------------------*/
+    std::vector<unsigned char> rgb_data;
+    rgb_data.reserve(colors.size() * 3);
+
+    for(std::size_t i = 0; i < colors.size(); i++)
+    {
+        rgb_data.push_back((unsigned char)RGBGetRValue(colors[i]));
+        rgb_data.push_back((unsigned char)RGBGetGValue(colors[i]));
+        rgb_data.push_back((unsigned char)RGBGetBValue(colors[i]));
+    }
+
+    controller->SetCustomFrame(rgb_data);
+}
+
+void RGBController_RazerSeiren::UpdateZoneLEDs(int /*zone*/)
+{
+    DeviceUpdateLEDs();
+}
+
+void RGBController_RazerSeiren::UpdateSingleLED(int /*led*/)
+{
+    DeviceUpdateLEDs();
+}
+
+void RGBController_RazerSeiren::DeviceUpdateMode()
+{
+    const mode& m = modes[active_mode];
+
+    switch(m.value)
+    {
+        case SEIREN_MODE_DIRECT:
+            controller->SetBrightness((unsigned char)m.brightness);
+            DeviceUpdateLEDs();
+            break;
+
+        case SEIREN_MODE_STATIC:
+        {
+            controller->SetBrightness((unsigned char)m.brightness);
+            RGBColor c = (m.colors.size() > 0) ? m.colors[0] : 0x00000000;
+            controller->SetStatic((unsigned char)RGBGetRValue(c),
+                                  (unsigned char)RGBGetGValue(c),
+                                  (unsigned char)RGBGetBValue(c));
+            break;
+        }
+
+        case SEIREN_MODE_BREATHING:
+        {
+            controller->SetBrightness(0xFF);
+            RGBColor c = (m.colors.size() > 0) ? m.colors[0] : 0x00000000;
+            controller->SetBreathing((unsigned char)RGBGetRValue(c),
+                                     (unsigned char)RGBGetGValue(c),
+                                     (unsigned char)RGBGetBValue(c));
+            break;
+        }
+
+        case SEIREN_MODE_SPECTRUM:
+            controller->SetBrightness(0xFF);
+            controller->SetSpectrum();
+            break;
+
+        case SEIREN_MODE_WAVE:
+        {
+            unsigned char dir = (m.direction == MODE_DIRECTION_RIGHT) ? 0x01 : 0x00;
+            controller->SetBrightness(0xFF);
+            controller->SetWave(dir, (unsigned char)m.speed);
+            break;
+        }
+
+        case SEIREN_MODE_OFF:
+            controller->SetOff();
+            break;
+    }
+}
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenController.cpp
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RazerSeirenController.cpp                                 |
+|                                                           |
+|   Pilote bas niveau du Razer Seiren V3 Chroma.            |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#include "RazerSeirenController.h"
+
+#include <cstring>
+#include <thread>
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+RazerSeirenController::RazerSeirenController(hid_device* dev_handle, const char* path)
+{
+    dev      = dev_handle;
+    location = path;
+
+    /*-----------------------------------------------------*\
+    | Lit firmware + numero de serie au demarrage           |
+    \*-----------------------------------------------------*/
+    GetFirmwareString();
+    GetSerialString();
+}
+
+RazerSeirenController::~RazerSeirenController()
+{
+    if(dev != nullptr)
+    {
+        hid_close(dev);
+    }
+}
+
+std::string RazerSeirenController::GetLocationString()
+{
+    return("HID: " + location);
+}
+
+/*-------------------------------------------------------------------------*\
+| Construit un razer_report compact de 63 octets, l'envoie en feature       |
+| report (report ID 0x07 prepended => 64 octets), puis lit la reponse.      |
+| CRC = XOR des octets [2..60], place en [61].                              |
+| Retourne 0 si OK, -1 sinon. response (63 octets) optionnel.              |
+\*-------------------------------------------------------------------------*/
+int RazerSeirenController::SendPacket(unsigned char  command_class,
+                                      unsigned char  command_id,
+                                      unsigned char  data_size,
+                                      const unsigned char* args,
+                                      unsigned char  args_len,
+                                      unsigned char* response)
+{
+    unsigned char report[SEIREN_REPORT_SIZE];
+    unsigned char usb_buf[1 + SEIREN_REPORT_SIZE];
+
+    memset(report, 0x00, sizeof(report));
+
+    report[0x00] = 0x00;                    /* status                       */
+    report[0x01] = SEIREN_TRANSACTION_ID;   /* transaction_id               */
+    report[0x05] = data_size;               /* data_size                    */
+    report[0x06] = command_class;           /* command_class                */
+    report[0x07] = command_id;              /* command_id                   */
+
+    if(args != nullptr && args_len > 0)
+    {
+        if(args_len > (SEIREN_REPORT_SIZE - 8 - 2))
+        {
+            args_len = (SEIREN_REPORT_SIZE - 8 - 2);
+        }
+        memcpy(&report[0x08], args, args_len);
+    }
+
+    /*-----------------------------------------------------*\
+    | CRC                                                   |
+    \*-----------------------------------------------------*/
+    unsigned char crc = 0;
+    for(int i = 2; i < 61; i++)
+    {
+        crc ^= report[i];
+    }
+    report[0x3D] = crc;                     /* octet 61                     */
+
+    /*-----------------------------------------------------*\
+    | Envoi (report ID 0x07 en tete)                        |
+    \*-----------------------------------------------------*/
+    usb_buf[0] = SEIREN_REPORT_ID;
+    memcpy(&usb_buf[1], report, SEIREN_REPORT_SIZE);
+
+    int ret = hid_send_feature_report(dev, usb_buf, sizeof(usb_buf));
+    if(ret < 0)
+    {
+        return(-1);
+    }
+
+    /*-----------------------------------------------------*\
+    | Lecture de la reponse si demandee                     |
+    \*-----------------------------------------------------*/
+    if(response != nullptr)
+    {
+        std::this_thread::sleep_for(40ms);
+
+        unsigned char in_buf[1 + SEIREN_REPORT_SIZE];
+        memset(in_buf, 0x00, sizeof(in_buf));
+        in_buf[0] = SEIREN_REPORT_ID;
+
+        int rret = hid_get_feature_report(dev, in_buf, sizeof(in_buf));
+        if(rret < 0)
+        {
+            return(-1);
+        }
+        memcpy(response, &in_buf[1], SEIREN_REPORT_SIZE);
+    }
+
+    return(0);
+}
+
+std::string RazerSeirenController::GetFirmwareString()
+{
+    if(!firmware.empty())
+    {
+        return(firmware);
+    }
+
+    unsigned char response[SEIREN_REPORT_SIZE];
+    memset(response, 0, sizeof(response));
+
+    /* classe 0x00 / cmd 0x81 : Get Firmware Version */
+    if(SendPacket(0x00, 0x81, 0x02, nullptr, 0, response) == 0 && response[0] == 0x02)
+    {
+        firmware = std::to_string(response[8]) + "." + std::to_string(response[9]);
+    }
+    return(firmware);
+}
+
+std::string RazerSeirenController::GetSerialString()
+{
+    if(!serial.empty())
+    {
+        return(serial);
+    }
+
+    unsigned char response[SEIREN_REPORT_SIZE];
+    memset(response, 0, sizeof(response));
+
+    /* classe 0x00 / cmd 0x82 : Get Serial */
+    if(SendPacket(0x00, 0x82, 0x16, nullptr, 0, response) == 0 && response[0] == 0x02)
+    {
+        char buf[23];
+        memcpy(buf, &response[8], 22);
+        buf[22] = '\0';
+        serial = std::string(buf);
+    }
+    return(serial);
+}
+
+void RazerSeirenController::SetBrightness(unsigned char level)
+{
+    /* classe 0x0F / cmd 0x04 : extended brightness */
+    unsigned char args[3] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, level };
+    SendPacket(0x0F, 0x04, 0x03, args, 3, nullptr);
+}
+
+void RazerSeirenController::SetStatic(unsigned char red, unsigned char green, unsigned char blue)
+{
+    /* classe 0x0F / cmd 0x02, effet static (0x01) */
+    unsigned char args[9] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, 0x01,
+                              0x00, 0x00, 0x01, red, green, blue };
+    SendPacket(0x0F, 0x02, 0x09, args, 9, nullptr);
+}
+
+void RazerSeirenController::SetBreathing(unsigned char red, unsigned char green, unsigned char blue)
+{
+    /* classe 0x0F / cmd 0x02, effet breathing (0x02), couleur unique */
+    unsigned char args[9] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, 0x02,
+                              0x01, 0x00, 0x01, red, green, blue };
+    SendPacket(0x0F, 0x02, 0x09, args, 9, nullptr);
+}
+
+void RazerSeirenController::SetSpectrum()
+{
+    /* classe 0x0F / cmd 0x02, effet spectrum (0x03) */
+    unsigned char args[6] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, 0x03, 0x00, 0x00, 0x00 };
+    SendPacket(0x0F, 0x02, 0x06, args, 6, nullptr);
+}
+
+void RazerSeirenController::SetWave(unsigned char direction, unsigned char speed)
+{
+    /* classe 0x0F / cmd 0x02, effet wave (0x04) */
+    unsigned char args[6] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, 0x04,
+                              (unsigned char)(direction & 0x01), speed, 0x00 };
+    SendPacket(0x0F, 0x02, 0x06, args, 6, nullptr);
+}
+
+void RazerSeirenController::SetOff()
+{
+    /* classe 0x0F / cmd 0x02, effet none (0x00) */
+    unsigned char args[6] = { SEIREN_VARSTORE, SEIREN_ZERO_LED, 0x00, 0x00, 0x00, 0x00 };
+    SendPacket(0x0F, 0x02, 0x06, args, 6, nullptr);
+}
+
+void RazerSeirenController::SetCustomFrame(const std::vector<unsigned char>& rgb_data)
+{
+    unsigned char num_leds = (unsigned char)(rgb_data.size() / 3);
+    if(num_leds > SEIREN_NUM_LEDS)
+    {
+        num_leds = SEIREN_NUM_LEDS;
+    }
+
+    unsigned char args[5 + SEIREN_NUM_LEDS * 3];
+    args[0] = 0x00;
+    args[1] = 0x00;
+    args[2] = 0x00;                         /* row_index            */
+    args[3] = 0x00;                         /* start_col            */
+    args[4] = (unsigned char)(num_leds - 1);/* stop_col             */
+    memcpy(&args[5], rgb_data.data(), num_leds * 3);
+
+    unsigned char data_size = (unsigned char)(5 + num_leds * 3);
+
+    /* classe 0x0F / cmd 0x03 : extended custom frame */
+    SendPacket(0x0F, 0x03, data_size, args, data_size, nullptr);
+}
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenPlugin.cpp
+=========================================================================*/
+
+/*---------------------------------------------------------*\
+| RazerSeirenPlugin.cpp                                     |
+|                                                           |
+|   Plugin OpenRGB ajoutant le support du Razer Seiren V3   |
+|   Chroma.                                                 |
+|                                                           |
+|   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#include "RazerSeirenPlugin.h"
+#include "RGBController_RazerSeiren.h"
+#include "RazerSeirenController.h"
+#include "RGBController.h"
+
+#include <algorithm>
+#include <string>
+#include <hidapi.h>
+#include <QLabel>
+
+/*-------------------------------------------------------------*\
+| Valeurs injectees par le .pro ; fallback si absentes          |
+\*-------------------------------------------------------------*/
+#ifndef VERSION_STRING
+#define VERSION_STRING "1.0"
+#endif
+#ifndef GIT_COMMIT_ID
+#define GIT_COMMIT_ID  ""
+#endif
+
+RazerSeirenPlugin::RazerSeirenPlugin()
+{
+}
+
+RazerSeirenPlugin::~RazerSeirenPlugin()
+{
+}
+
+OpenRGBPluginInfo RazerSeirenPlugin::GetPluginInfo()
+{
+    OpenRGBPluginInfo info;
+    info.Name           = "Razer Seiren V3 Chroma";
+    info.Description     = "Ajoute le support RGB du microphone Razer Seiren V3 Chroma";
+    info.Version        = VERSION_STRING;
+    info.Commit         = GIT_COMMIT_ID;
+    info.URL            = "";
+    info.Location       = OPENRGB_PLUGIN_LOCATION_INFORMATION;
+    info.Label          = "Seiren";
+    info.TabIconString  = "Seiren";
+
+    return(info);
+}
+
+unsigned int RazerSeirenPlugin::GetPluginAPIVersion()
+{
+    return(OPENRGB_PLUGIN_API_VERSION);
+}
+
+/*-------------------------------------------------------------------------*\
+| Detecte le Seiren et enregistre un controleur s'il n'est pas deja present |
+\*-------------------------------------------------------------------------*/
+void RazerSeirenPlugin::DetectAndRegister()
+{
+    if(RM == nullptr)
+    {
+        return;
+    }
+
+    struct hid_device_info* info = hid_enumerate(SEIREN_VID, SEIREN_PID);
+    struct hid_device_info* cur  = info;
+
+    while(cur != nullptr)
+    {
+        /*-------------------------------------------------*\
+        | Seule l'interface vendor 0xFF53 pilote les LEDs   |
+        \*-------------------------------------------------*/
+        if(cur->usage_page == SEIREN_USAGE_PAGE)
+        {
+            std::string location = "HID: " + std::string(cur->path);
+
+            /*---------------------------------------------*\
+            | Eviter les doublons : deja enregistre ?       |
+            \*---------------------------------------------*/
+            bool already = false;
+            for(RGBController* existing : RM->GetRGBControllers())
+            {
+                if(existing->GetLocation() == location)
+                {
+                    already = true;
+                    break;
+                }
+            }
+
+            if(!already)
+            {
+                hid_device* dev = hid_open_path(cur->path);
+
+                if(dev != nullptr)
+                {
+                    RazerSeirenController*     controller = new RazerSeirenController(dev, cur->path);
+                    RGBController_RazerSeiren* rgb_ctrl   = new RGBController_RazerSeiren(controller);
+
+                    RM->RegisterRGBController(rgb_ctrl);
+                    controllers.push_back(rgb_ctrl);
+                }
+            }
+        }
+        cur = cur->next;
+    }
+
+    if(info != nullptr)
+    {
+        hid_free_enumeration(info);
+    }
+}
+
+/*-------------------------------------------------------------------------*\
+| Debut de detection (rescan) : OpenRGB s'apprete a detruire (delete) tous   |
+| les controleurs de rgb_controllers_hw, dont les notres. On lache nos       |
+| references SANS delete (OpenRGB s'en charge) pour eviter un double-free.   |
+\*-------------------------------------------------------------------------*/
+void RazerSeirenPlugin::OnDetectionStart(void* this_ptr)
+{
+    RazerSeirenPlugin* self = static_cast<RazerSeirenPlugin*>(this_ptr);
+    self->controllers.clear();
+}
+
+/*-------------------------------------------------------------------------*\
+| Fin de detection : on (re)enregistre le micro.                            |
+\*-------------------------------------------------------------------------*/
+void RazerSeirenPlugin::OnDetectionEnd(void* this_ptr)
+{
+    RazerSeirenPlugin* self = static_cast<RazerSeirenPlugin*>(this_ptr);
+    self->DetectAndRegister();
+}
+
+void RazerSeirenPlugin::Load(ResourceManagerInterface* resource_manager_ptr)
+{
+    RM = resource_manager_ptr;
+
+    hid_init();
+
+    /*-----------------------------------------------------*\
+    | Re-enregistrement automatique a chaque rescan          |
+    \*-----------------------------------------------------*/
+    RM->RegisterDetectionStartCallback(&RazerSeirenPlugin::OnDetectionStart, this);
+    RM->RegisterDetectionEndCallback(&RazerSeirenPlugin::OnDetectionEnd, this);
+
+    /*-----------------------------------------------------*\
+    | Enregistrement initial (la detection de demarrage est |
+    | deja terminee quand le plugin est charge)             |
+    \*-----------------------------------------------------*/
+    DetectAndRegister();
+}
+
+QWidget* RazerSeirenPlugin::GetWidget()
+{
+    /*-----------------------------------------------------*\
+    | OpenRGB ne verifie pas le nullptr ici : on DOIT        |
+    | renvoyer un widget valide, sinon access violation.    |
+    \*-----------------------------------------------------*/
+    QLabel* widget = new QLabel(
+        "Razer Seiren V3 Chroma\n\n"
+        "Plugin RGB actif.\n"
+        "Pilote le micro depuis l'onglet Devices.");
+    widget->setAlignment(Qt::AlignCenter);
+    widget->setWordWrap(true);
+    return(widget);
+}
+
+QMenu* RazerSeirenPlugin::GetTrayMenu()
+{
+    return(nullptr);
+}
+
+void RazerSeirenPlugin::Unload()
+{
+    if(RM != nullptr)
+    {
+        RM->UnregisterDetectionStartCallback(&RazerSeirenPlugin::OnDetectionStart, this);
+        RM->UnregisterDetectionEndCallback(&RazerSeirenPlugin::OnDetectionEnd, this);
+
+        /*-------------------------------------------------*\
+        | Ne supprimer que les controleurs encore presents  |
+        | dans la liste d'OpenRGB (les autres ont deja ete  |
+        | detruits par Cleanup) -> evite tout double-free.  |
+        \*-------------------------------------------------*/
+        std::vector<RGBController*>& list = RM->GetRGBControllers();
+        for(RGBController* c : controllers)
+        {
+            if(std::find(list.begin(), list.end(), c) != list.end())
+            {
+                RM->UnregisterRGBController(c);
+                delete c;
+            }
+        }
+    }
+    controllers.clear();
+
+    hid_exit();
+}
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenChroma.pro
+=========================================================================*/
+
+#-----------------------------------------------------------------------------#
+# Razer Seiren V3 Chroma - Plugin OpenRGB (QMake)                              #
+#                                                                             #
+# Pre-requis : le dossier "OpenRGB/" doit contenir les sources OpenRGB        #
+# (ajoute en sous-module git ou clone). Voir README.md.                       #
+#-----------------------------------------------------------------------------#
+
+QT          += core gui widgets
+
+if(greaterThan(QT_MAJOR_VERSION, 5)) {
+    QT += core5compat
+}
+
+TEMPLATE    = lib
+CONFIG      += plugin c++17 silent
+TARGET      = RazerSeirenChroma
+
+#-----------------------------------------------------------------------------#
+# Version                                                                     #
+#-----------------------------------------------------------------------------#
+VERSION_STR     = "1.0"
+GIT_COMMIT_ID   = $$system(git log -n 1 --pretty=format:"%H")
+GIT_COMMIT_DATE = $$system(git log -n 1 --pretty=format:"%ci")
+win32:BUILDDATE = $$system(date /t)
+
+DEFINES +=                                                                     \
+    VERSION_STRING=\\"\"\"$$VERSION_STR\\"\"\"                                 \
+    GIT_COMMIT_ID=\\"\"\"$$GIT_COMMIT_ID\\"\"\"                                \
+    GIT_COMMIT_DATE=\\"\"\"$$GIT_COMMIT_DATE\\"\"\"                            \
+    BUILDDATE_STRING=\\"\"\"$$BUILDDATE\\"\"\"
+
+#-----------------------------------------------------------------------------#
+# OpenRGB Plugin SDK (sous-module dans OpenRGB/)                               #
+#-----------------------------------------------------------------------------#
+INCLUDEPATH +=                                                                 \
+    OpenRGB                                                                    \
+    OpenRGB/RGBController                                                      \
+    OpenRGB/dependencies/json                                                  \
+    OpenRGB/qt                                                                 \
+    OpenRGB/i2c_smbus                                                          \
+    OpenRGB/net_port                                                           \
+
+HEADERS +=                                                                     \
+    OpenRGB/OpenRGBPluginInterface.h                                           \
+    OpenRGB/ResourceManagerInterface.h                                         \
+    OpenRGB/RGBController/RGBController.h                                       \
+    RazerSeirenController.h                                                    \
+    RGBController_RazerSeiren.h                                                \
+    RazerSeirenPlugin.h                                                        \
+
+SOURCES +=                                                                     \
+    OpenRGB/RGBController/RGBController.cpp                                     \
+    OpenRGB/LogManager.cpp                                                     \
+    OpenRGB/qt/hsv.cpp                                                         \
+    RazerSeirenController.cpp                                                  \
+    RGBController_RazerSeiren.cpp                                              \
+    RazerSeirenPlugin.cpp                                                      \
+
+DISTFILES +=                                                                   \
+    RazerSeirenPlugin.json                                                     \
+    README.md                                                                  \
+
+#-----------------------------------------------------------------------------#
+# hidapi (Windows : prebuilt fourni avec OpenRGB)                             #
+#-----------------------------------------------------------------------------#
+win32 {
+    INCLUDEPATH += OpenRGB/dependencies/hidapi-win/include
+    DEFINES     += USE_HID_USAGE
+
+    contains(QMAKE_TARGET.arch, x86_64) {
+        LIBS += -L"$$PWD/OpenRGB/dependencies/hidapi-win/x64/" -lhidapi
+    } else {
+        LIBS += -L"$$PWD/OpenRGB/dependencies/hidapi-win/x86/" -lhidapi
+    }
+}
+
+#-----------------------------------------------------------------------------#
+# hidapi (Linux : paquet systeme)                                            #
+#-----------------------------------------------------------------------------#
+unix:!macx {
+    CONFIG  += link_pkgconfig
+    DEFINES += USE_HID_USAGE
+    packagesExist(hidapi-hidraw) {
+        PKGCONFIG += hidapi-hidraw
+    } else {
+        PKGCONFIG += hidapi
+    }
+}
+
+
+/*=========================================================================
+  =====> FICHIER: plugin/RazerSeirenPlugin.json
+=========================================================================*/
+
+{
+    "Name": "Razer Seiren V3 Chroma",
+    "Description": "Ajoute le support RGB du microphone Razer Seiren V3 Chroma a OpenRGB"
+}
+

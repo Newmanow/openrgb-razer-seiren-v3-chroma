@@ -1,0 +1,23 @@
+# --- Build artifacts qmake / nmake ---
+plugin/release/
+plugin/debug/
+plugin/Makefile
+plugin/Makefile.Debug
+plugin/Makefile.Release
+plugin/.qmake.stash
+plugin/object_script.*
+*.obj
+*.o
+moc_*.cpp
+moc_predefs.h
+*.dll
+*.lib
+*.exp
+*.pdb
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- OpenRGB (source tierce, a cloner separement) ---
+OpenRGB/
